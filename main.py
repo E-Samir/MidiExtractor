@@ -7,38 +7,19 @@ import os
 import uuid
 from music21 import converter, instrument  # or import *
 import shutil
+import multiprocessing
+from multiprocessing import Process, Queue
+from lib.utils import recursive_mkdir, find_all_files
 
 
 class MidiExtractor:
-    def __init__(self):
-        logging.basicConfig(format='%(levelname)s:%(message)s', level=logging.DEBUG)
+    queue = None
 
-    def __recursive_mkdir__(self, newdir):
-        """works the way mkdir -p should :)
-            - already exists, silently complete
-            - regular file in the way, raise an exception
-            - parent directory(ies) does not exist, make them as well
-        """
-        if os.path.isdir(newdir):
-            pass
-        elif os.path.isfile(newdir):
-            raise OSError("a file with the same name as the desired " \
-                          "dir, '%s', already exists." % newdir)
-        else:
-            head, tail = os.path.split(newdir)
-            if head and not os.path.isdir(head):
-                self.__recursive_mkdir__(head)
-            if tail:
-                os.mkdir(newdir)
+    def __init__(self, workers):
+        self.queue = Queue()
+        self.workers = int(workers)
 
-    @staticmethod
-    def find_all_files(folder, pattern):
-        matches = []
-        for root, dirnames, filenames in os.walk(folder):
-            for filename in fnmatch.filter(filenames, pattern):
-                matches.append(os.path.join(root, filename))
-
-        return matches
+        logging.basicConfig(format='%(asctime)s %(levelname)s %(message)s', level=logging.DEBUG)
 
     def get_output_folder(self, song):
         # base_path=os.path.dirname(song)
@@ -46,20 +27,13 @@ class MidiExtractor:
 
         folder = "out/{}/tracks".format(os.path.splitext(song)[0])
         if not os.path.exists(folder):
-            self.__recursive_mkdir__(folder)
+            recursive_mkdir(folder)
 
         return os.path.join(folder, str(uuid.uuid1()) + ".mid")
 
-    def split_song(self, song):
-        s = converter.parse(song)
-        for part in s.parts:
-            out_name = self.get_output_folder(song)
-            part.write('midi', fp=out_name)
-
-    def process_songs(self, input_data):
-        all_songs = self.find_all_files(os.path.realpath(input_data), "*.midi")
-
-        for song in all_songs:
+    def __process_song__(self):
+        while not self.queue.empty():
+            song = self.queue.get()
             folder = os.path.dirname(self.get_output_folder(song))
             logging.debug("removing folder: {}".format(folder))
             os.system("rm -fr {}".format(folder))
@@ -68,16 +42,33 @@ class MidiExtractor:
             parts = parts[:len(parts) - 1]
             dest_song = "/".join(parts)
             shutil.copy(song, dest_song)
-            self.split_song(song)
+            stream = converter.parse(song)
+            for part in stream.parts:
+                out_name = self.get_output_folder(song)
+                part.write('midi', fp=out_name)
+
+    def process_songs(self, input_data):
+        all_songs = find_all_files(os.path.realpath(input_data), "*.midi")
+
+        ##add all songs into queue
+        for song in all_songs:
+            self.queue.put(song)
+
+        jobs = []
+        for i in range(self.workers):
+            p = multiprocessing.Process(target=self.__process_song__)
+            jobs.append(p)
+            p.start()
 
 
 def main():
     parser = argparse.ArgumentParser(description='Midi Processor Script')
     parser.add_argument('--songdir', action="store", dest="songdir", default="all", help="override song")
+    parser.add_argument('--workers', action="store", dest="workers", default="1", help="default workers")
 
     args = parser.parse_args()
 
-    foobar = MidiExtractor()
+    foobar = MidiExtractor(args.workers)
     if args.songdir == 'all':
         foobar.process_songs("../midiscraper/out/")
     else:
